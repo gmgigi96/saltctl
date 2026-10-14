@@ -81,8 +81,10 @@ saltctl login                       # verify credentials
 saltctl status                      # model / firmware / serial
 saltctl devices                     # connected devices
 
-# LED
-saltctl led off | dim | on          # 0 / 1 / 2
+# LED brightness of the Smart Wi-Fi *extenders* (0/1/2).
+# NOTE: this does NOT control the main Fiber Box's own status LEDs —
+# that firmware exposes no way to switch the box's lights off.
+saltctl led off | dim | on
 saltctl led get
 
 # Wi-Fi (friendly wrappers; -band 24|5|both, default both)

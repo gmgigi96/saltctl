@@ -797,7 +797,8 @@ Commands:
   areas                          list feature areas
   get <area>                     read an area's settings
   set <area> k=v ... [-yes]      change settings (risky areas need -yes)
-  led get|off|dim|on|set <0-2>   LED brightness
+  led get|off|dim|on|set <0-2>   Smart Wi-Fi *extender* LED brightness
+                                 (not the main box's own status LEDs)
   wifi get|on|off|ssid|password|channel [-band 24|5|both] [-yes]
   guest on|off|ssid <n>|password <pw> [-band]
   dect on|off|eco on|off

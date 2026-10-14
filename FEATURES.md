@@ -53,7 +53,7 @@ Two write mechanisms are reproduced faithfully:
 
 | Command | Endpoint | Status |
 |---|---|---|
-| `led off / dim / on / set N` | owl_cmd.cgi `setLED` | ✅ tested |
+| `led off / dim / on / set N` | owl_cmd.cgi `setLED` | ✅ tested — **Smart Wi‑Fi extenders only**; the main unit's own status LEDs are not controllable by this firmware |
 | `wifi on / off -yes` | apply `ui_wireless` (both radios) | implemented |
 | `mesh optimize / reboot / reset` | owl_cmd.cgi | implemented |
 | `reboot -yes` | apply `reboot` | implemented |
