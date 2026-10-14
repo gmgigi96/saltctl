@@ -123,6 +123,12 @@ type Rebooter interface {
 	Reboot() (string, error)
 }
 
+// Backup saves and restores the box's (encrypted) configuration blob.
+type Backup interface {
+	ConfigSave() (data []byte, filename string, err error)
+	ConfigRestore(data []byte, filename string) (string, error)
+}
+
 // Raw is the escape hatch for anything not wrapped.
 type Raw interface {
 	RawGet(cgi, page string) (string, error)

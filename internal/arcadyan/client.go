@@ -1,8 +1,10 @@
 package arcadyan
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -154,6 +156,69 @@ func (c *Client) Apply(cmd, page string, fields map[string]string) (string, erro
 	}
 	_, body, err := c.do("POST", "/apply_abstract.cgi", page, strings.NewReader(form.Encode()), "application/x-www-form-urlencoded")
 	return body, err
+}
+
+// GetRaw performs an authenticated GET and returns status, content-type, body.
+// Used for file downloads (e.g. the config backup) rather than cgi/page reads.
+func (c *Client) GetRaw(path, referer string) (int, string, []byte, error) {
+	req, _ := http.NewRequest("GET", c.Base+path, nil)
+	req.Header.Set("User-Agent", defaultUA)
+	if referer != "" {
+		req.Header.Set("Referer", c.Base+"/"+strings.TrimLeft(referer, "/"))
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header.Get("Content-Type"), b, err
+}
+
+// FreshToken loads page and returns its httoken (and a millisecond stamp).
+func (c *Client) FreshToken(page string) (string, string, error) {
+	_, sec, err := c.Page(page)
+	if err != nil {
+		return "", "", err
+	}
+	return sec.Token, fmt.Sprint(time.Now().UnixMilli()), nil
+}
+
+// UploadConfig posts a multipart restore to endpoint (e.g. /upload.cgi):
+// action=AES(cmd), httoken, submit_button=page, and the file under fileField.
+func (c *Client) UploadConfig(endpoint, page, cmd, fileField, fileName string, data []byte) (string, error) {
+	_, sec, err := c.Page(page)
+	if err != nil {
+		return "", err
+	}
+	action, err := aesEncode(sec, cmd)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("action", action)
+	_ = w.WriteField("httoken", sec.Token)
+	_ = w.WriteField("submit_button", page)
+	fw, err := w.CreateFormFile(fileField, fileName)
+	if err != nil {
+		return "", err
+	}
+	if _, err := fw.Write(data); err != nil {
+		return "", err
+	}
+	w.Close()
+	req, _ := http.NewRequest("POST", c.Base+"/"+strings.TrimLeft(endpoint, "/"), &buf)
+	req.Header.Set("User-Agent", defaultUA)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Referer", c.Base+"/"+page)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b), nil
 }
 
 // PageData loads a page and every cgi it declares, returning the merged

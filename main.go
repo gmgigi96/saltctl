@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,6 +85,8 @@ func main() {
 		cmdMesh(dev(), args[1:])
 	case "reboot":
 		cmdReboot(dev(), args[1:])
+	case "config":
+		cmdConfig(dev(), args[1:])
 	case "raw":
 		cmdRaw(dev(), args[1:])
 	case "help", "-h", "--help":
@@ -443,6 +446,55 @@ func cmdReboot(dev saltbox.Device, args []string) {
 	fmt.Printf("reboot requested. %s\n", respLine(body))
 }
 
+// ---- config save / restore ----
+
+func cmdConfig(dev saltbox.Device, args []string) {
+	bk := capOf[saltbox.Backup](dev)
+	if len(args) == 0 {
+		fatal(fmt.Errorf("usage: config save [-o file] | config restore <file> -yes"))
+	}
+	switch args[0] {
+	case "save":
+		fc := flag.NewFlagSet("config save", flag.ExitOnError)
+		out := fc.String("o", "", "output file (default: the box's own name)")
+		fc.Parse(args[1:])
+		data, fn, err := bk.ConfigSave()
+		if err != nil {
+			fatal(err)
+		}
+		path := *out
+		if path == "" {
+			path = fn
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			fatal(err)
+		}
+		fmt.Printf("saved %d bytes to %s (encrypted config blob)\n", len(data), path)
+	case "restore":
+		fc := flag.NewFlagSet("config restore", flag.ExitOnError)
+		yes := fc.Bool("yes", false, "confirm (overwrites config and reboots)")
+		fc.Parse(args[1:])
+		file := fc.Arg(0)
+		if file == "" {
+			fatal(fmt.Errorf("usage: config restore <file> -yes"))
+		}
+		if !*yes {
+			fatal(fmt.Errorf("restore overwrites all settings and reboots the box; re-run with -yes"))
+		}
+		data, err := os.ReadFile(file)
+		if err != nil {
+			fatal(err)
+		}
+		body, err := bk.ConfigRestore(data, filepath.Base(file))
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("restore uploaded (%d bytes); box will apply & reboot. %s\n", len(data), respLine(body))
+	default:
+		fatal(fmt.Errorf("usage: config save [-o file] | config restore <file> -yes"))
+	}
+}
+
 // ---- raw ----
 
 func cmdRaw(dev saltbox.Device, args []string) {
@@ -587,6 +639,8 @@ Commands:
   upnp get|on|off
   mesh optimize|reboot|reset [-yes]
   reboot -yes
+  config save [-o file]          download the (encrypted) config
+  config restore <file> -yes     upload a saved config (reboots)
   raw get|post|apply ...         escape hatch for anything else
 
 Example:

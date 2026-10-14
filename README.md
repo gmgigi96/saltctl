@@ -101,6 +101,8 @@ saltctl upnp on | off
 saltctl dect on | off
 saltctl mesh optimize               # reboot|reset need -yes
 saltctl reboot -yes
+saltctl config save -o home.cfg     # download the (encrypted) config backup
+saltctl config restore home.cfg -yes
 
 # generic layer — a command for every page (see FEATURES.md)
 saltctl areas
@@ -121,11 +123,11 @@ USB, password, factory reset) that use `raw apply`.
 - **Tested against the live box:** `login`, `models`, `led get/off/dim/on/set`,
   `status`, `devices`, `areas`, `get <area>` across areas, **the AES write path
   (`set` / `upnp on`/`off`) verified via a reversible UPnP toggle**,
-  `raw get/post`.
+  `config save` (downloads the encrypted blob), `raw get/post`.
 - **Implemented from the UI's JS but not exercised here** (they change live
-  config / restart service): `reboot`, `wifi on/off`, `mesh reboot/reset`, and
-  `set`/`raw apply` on connectivity-affecting areas. Try these deliberately;
-  risky areas require `-yes`.
+  config / restart service): `reboot`, `config restore`, `wifi on/off`,
+  `mesh reboot/reset`, and `set`/`raw apply` on connectivity-affecting areas.
+  Try these deliberately; risky areas require `-yes`.
 
 ## Scheduling (lights off at night)
 

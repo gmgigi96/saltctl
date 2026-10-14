@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gmgigi96/saltctl/internal/arcadyan"
 	"github.com/gmgigi96/saltctl/internal/saltbox"
@@ -354,6 +355,46 @@ func (b *Box) MeshAction(action string) (string, error) {
 
 func (b *Box) Reboot() (string, error) {
 	return b.c.Apply("reboot", "system_r.htm", nil)
+}
+
+// --- config backup / restore ---
+
+var bkupFileRe = regexp.MustCompile(`cgi_bkup_file='([^']+)'`)
+
+// ConfigSave downloads the box's encrypted configuration blob. Loading
+// cgi_sys_bk.js makes the box generate it under /tmp; it is then fetched with
+// the same page token.
+func (b *Box) ConfigSave() ([]byte, string, error) {
+	tok, ms, err := b.c.FreshToken("system_backup.htm")
+	if err != nil {
+		return nil, "", err
+	}
+	_, _, js, err := b.c.GetRaw("/cgi/cgi_sys_bk.js?_tn="+tok+"&_t="+ms, "system_backup.htm")
+	if err != nil {
+		return nil, "", err
+	}
+	m := bkupFileRe.FindSubmatch(js)
+	if m == nil {
+		return nil, "", fmt.Errorf("backup filename not found")
+	}
+	fn := string(m[1])
+	ms2 := fmt.Sprint(time.Now().UnixMilli())
+	code, _, data, err := b.c.GetRaw("/tmp/"+fn+"?_tn="+tok+"&_t="+ms2, "system_backup.htm")
+	if err != nil {
+		return nil, "", err
+	}
+	if code != 200 || len(data) == 0 {
+		return nil, "", fmt.Errorf("download %s: HTTP %d (%d bytes)", fn, code, len(data))
+	}
+	return data, fn, nil
+}
+
+// ConfigRestore uploads a previously saved blob and reboots the box.
+func (b *Box) ConfigRestore(data []byte, name string) (string, error) {
+	if name == "" {
+		name = "restore.cfg"
+	}
+	return b.c.UploadConfig("/upload.cgi", "system_backup.htm", "SYS_PROF", "restore", name, data)
 }
 
 // --- raw ---
