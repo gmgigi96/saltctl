@@ -18,6 +18,13 @@ import (
 	_ "github.com/gmgigi96/saltctl/internal/saltbox/fiberbox" // register the model
 )
 
+// Build metadata, set via -ldflags at release time (see .goreleaser.yaml).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	fs := flag.NewFlagSet("saltctl", flag.ContinueOnError)
 	fs.Usage = usage
@@ -26,10 +33,15 @@ func main() {
 	model := fs.String("model", envOr("SALTCTL_MODEL", "fiberbox"), "box model")
 	pass := fs.String("password", "", "admin password (else $SALTCTL_PASSWORD / -password-file)")
 	passFile := fs.String("password-file", "", "file holding the admin password")
+	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
 	args := fs.Args()
+	if *showVersion || (len(args) > 0 && args[0] == "version") {
+		fmt.Printf("saltctl %s (commit %s, built %s)\n", version, commit, date)
+		return
+	}
 	if len(args) == 0 {
 		usage()
 		os.Exit(2)

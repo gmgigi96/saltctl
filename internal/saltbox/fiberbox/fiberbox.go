@@ -532,10 +532,10 @@ func (b *Box) DHCPReserve(mac, ip, name string) (int, error) {
 	}
 	s := strconv.Itoa(idx)
 	_, err = b.applyFields("lan_dhcp_static.htm", "ui_dhcp_static", map[string]string{
-		"static_enable":      "1",
-		"static_mac_0_" + s:  mac,
-		"static_ip_0_" + s:   ip,
-		"static_name_0_" + s: name,
+		"static_enable":        "1",
+		"static_mac_0_" + s:    mac,
+		"static_ip_0_" + s:     ip,
+		"static_name_0_" + s:   name,
 		"static_active_0_" + s: "1",
 	})
 	return idx, err

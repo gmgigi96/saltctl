@@ -6,7 +6,9 @@ import (
 )
 
 // Editable settings are declared in cgi data files as
-//   addCfg("<name>", "<numericID>", "<currentValue>")
+//
+//	addCfg("<name>", "<numericID>", "<currentValue>")
+//
 // where the numeric ID is the apply_abstract.cgi form field name.
 var (
 	addCfgRe   = regexp.MustCompile(`addCfg\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*\)`)

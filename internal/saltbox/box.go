@@ -133,10 +133,10 @@ type Backup interface {
 
 // PortForwardRule is one port-forwarding entry. Protocol is tcp|udp|both.
 type PortForwardRule struct {
-	Index                                              int
-	Enabled                                            bool
-	Protocol, InternalIP                               string
-	PublicStart, PublicEnd, PrivateStart, PrivateEnd   int
+	Index                                            int
+	Enabled                                          bool
+	Protocol, InternalIP                             string
+	PublicStart, PublicEnd, PrivateStart, PrivateEnd int
 }
 
 type PortForward interface {
