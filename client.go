@@ -176,6 +176,32 @@ func (c *Client) Apply(cmd, page string, fields map[string]string) (string, erro
 	return body, err
 }
 
+// PageData loads a page and every cgi data file it declares, returning the
+// merged editable Config (addCfg entries) and, per cgi, the read-only vars.
+func (c *Client) PageData(page string) (*Config, map[string][]kv, error) {
+	body, _, err := c.page(page)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := &Config{byName: map[string]int{}}
+	reads := map[string][]kv{}
+	for _, name := range pageCGIs(body) {
+		js, err := c.GetCGI(name, page)
+		if err != nil {
+			reads[name] = []kv{{"(error)", err.Error()}}
+			continue
+		}
+		for _, f := range parseConfig(js).Fields {
+			if _, dup := cfg.byName[f.Name]; !dup {
+				cfg.byName[f.Name] = len(cfg.Fields)
+				cfg.Fields = append(cfg.Fields, f)
+			}
+		}
+		reads[name] = parseVars(js)
+	}
+	return cfg, reads, nil
+}
+
 // --- small parsers for the firmware's JS data files ---
 
 var (

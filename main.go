@@ -58,6 +58,16 @@ func main() {
 		cmdDump(newClient(), "clients.htm")
 	case "reboot":
 		cmdReboot(newClient, args[1:])
+	case "areas":
+		cmdAreas()
+	case "get":
+		cmdGet(newClient, args[1:])
+	case "set":
+		cmdSet(newClient, args[1:])
+	case "wifi":
+		cmdWifi(newClient, args[1:])
+	case "mesh":
+		cmdMesh(newClient, args[1:])
 	case "raw":
 		cmdRaw(newClient, args[1:])
 	case "help", "-h", "--help":
@@ -160,6 +170,167 @@ func cmdReboot(newClient func() *Client, args []string) {
 		fatal(err)
 	}
 	fmt.Printf("reboot requested; box restarting. response: %s\n", strings.TrimSpace(firstLine(body)))
+}
+
+// ---- areas / get / set (generic settings layer) ----
+
+func cmdAreas() {
+	fmt.Printf("%-18s %-4s %s\n", "AREA", "RW", "DESCRIPTION")
+	for _, a := range areas {
+		rw := "r"
+		if a.Cmd != "" {
+			rw = "rw"
+		}
+		risk := ""
+		if a.Risky {
+			risk = "  [risky: can drop connectivity]"
+		}
+		fmt.Printf("%-18s %-4s %s%s\n", a.Name, rw, a.Desc, risk)
+	}
+	fmt.Println("\nget <area>            read an area's settings")
+	fmt.Println("set <area> k=v ...    change settings (writable areas; -yes for risky)")
+}
+
+func cmdGet(newClient func() *Client, args []string) {
+	if len(args) == 0 {
+		fatal(fmt.Errorf("usage: get <area>   (see `areas`)"))
+	}
+	a, ok := findArea(args[0])
+	if !ok {
+		fatal(fmt.Errorf("unknown area %q (see `areas`)", args[0]))
+	}
+	cfg, reads, err := newClient().PageData(a.Page)
+	if err != nil {
+		fatal(err)
+	}
+	if len(cfg.Fields) > 0 {
+		fmt.Printf("# %s — editable settings (name = value)\n", a.Name)
+		for _, f := range cfg.Fields {
+			fmt.Printf("%-30s = %s\n", f.Name, f.Value)
+		}
+	}
+	for cgi, vars := range reads {
+		if len(vars) == 0 {
+			continue
+		}
+		fmt.Printf("# %s — read-only (cgi_%s.js)\n", a.Name, cgi)
+		for _, v := range vars {
+			fmt.Printf("%-30s = %s\n", v.Key, v.Val)
+		}
+	}
+}
+
+func cmdSet(newClient func() *Client, args []string) {
+	fss := flag.NewFlagSet("set", flag.ExitOnError)
+	yes := fss.Bool("yes", false, "confirm a change to a risky area")
+	fss.Parse(args)
+	rest := fss.Args()
+	if len(rest) < 2 {
+		fatal(fmt.Errorf("usage: set <area> name=value ...   (see `areas`)"))
+	}
+	a, ok := findArea(rest[0])
+	if !ok {
+		fatal(fmt.Errorf("unknown area %q (see `areas`)", rest[0]))
+	}
+	if a.Cmd == "" {
+		fatal(fmt.Errorf("area %q is read-only here; use `raw apply` for its actions", a.Name))
+	}
+	if a.Risky && !*yes {
+		fatal(fmt.Errorf("area %q can drop connectivity; re-run with -yes", a.Name))
+	}
+	pairs := kvArgs(rest[1:])
+	if len(pairs) == 0 {
+		fatal(fmt.Errorf("no name=value pairs given"))
+	}
+	c := newClient()
+	cfg, _, err := c.PageData(a.Page)
+	if err != nil {
+		fatal(err)
+	}
+	changes := map[string]string{}
+	for name, val := range pairs {
+		f, ok := cfg.lookup(name)
+		if !ok {
+			fatal(fmt.Errorf("unknown setting %q for area %s (try `get %s`)", name, a.Name, a.Name))
+		}
+		changes[f.ID] = val
+		fmt.Printf("  %s (%s): %q -> %q\n", name, f.ID, f.Value, val)
+	}
+	body, err := c.Apply(a.Cmd, a.Page, changes)
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("applied (cmd=%s). response: %s\n", a.Cmd, strings.TrimSpace(firstLine(body)))
+}
+
+// ---- wifi / mesh convenience ----
+
+func cmdWifi(newClient func() *Client, args []string) {
+	fsw := flag.NewFlagSet("wifi", flag.ExitOnError)
+	yes := fsw.Bool("yes", false, "confirm enabling/disabling Wi-Fi")
+	fsw.Parse(args)
+	sub := "get"
+	if fsw.NArg() > 0 {
+		sub = fsw.Arg(0)
+	}
+	switch sub {
+	case "get":
+		cmdGet(newClient, []string{"wifi"})
+	case "on", "off":
+		if !*yes {
+			fatal(fmt.Errorf("`wifi %s` changes the radios; re-run with -yes", sub))
+		}
+		val := "1"
+		if sub == "off" {
+			val = "0"
+		}
+		c := newClient()
+		for _, pair := range [][2]string{{"wifi24", "Wireless_enable24G"}, {"wifi5", "Wireless_enable5G"}} {
+			a, _ := findArea(pair[0])
+			cfg, _, err := c.PageData(a.Page)
+			if err != nil {
+				fatal(err)
+			}
+			f, ok := cfg.lookup(pair[1])
+			if !ok {
+				fatal(fmt.Errorf("%s: field %s not found", pair[0], pair[1]))
+			}
+			if _, err := c.Apply(a.Cmd, a.Page, map[string]string{f.ID: val}); err != nil {
+				fatal(err)
+			}
+			fmt.Printf("%s %s -> %s\n", pair[0], pair[1], val)
+		}
+	default:
+		fatal(fmt.Errorf("usage: wifi [get|on|off]"))
+	}
+}
+
+func cmdMesh(newClient func() *Client, args []string) {
+	if len(args) == 0 {
+		fatal(fmt.Errorf("usage: mesh <optimize|reboot|reset> [-yes]"))
+	}
+	fsm := flag.NewFlagSet("mesh", flag.ExitOnError)
+	yes := fsm.Bool("yes", false, "confirm reboot/reset")
+	fsm.Parse(args[1:])
+	var cmd string
+	switch args[0] {
+	case "optimize":
+		cmd = "getdiscoptimising"
+	case "reboot":
+		cmd = "reboot"
+	case "reset":
+		cmd = "reset"
+	default:
+		fatal(fmt.Errorf("usage: mesh <optimize|reboot|reset>"))
+	}
+	if (cmd == "reboot" || cmd == "reset") && !*yes {
+		fatal(fmt.Errorf("`mesh %s` is disruptive; re-run with -yes", args[0]))
+	}
+	body, err := newClient().PostSimple("/owl_cmd.cgi", "owl_discs.htm", map[string]string{"cmd": cmd})
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("mesh %s -> %s\n", args[0], strings.TrimSpace(firstLine(body)))
 }
 
 // ---- raw (escape hatch for any feature) ----
@@ -304,11 +475,15 @@ Global flags:
 
 Commands:
   login                      verify credentials
-  led get                    show current LED brightness of each node
-  led off|dim|on             set LEDs to Off / Dim / Normal
-  led set <0|1|2> [-target]  set a specific level (-target ALL or a MAC)
-  status                     dump overview / modem status
-  devices                    dump connected-device data
+  areas                      list feature areas (what get/set can target)
+  get <area>                 read an area's settings + status
+  set <area> k=v ... [-yes]  change settings (writable areas; -yes if risky)
+  led get|off|dim|on         LED brightness (Off/Dim/Normal)
+  led set <0|1|2> [-target]  set a specific LED level
+  wifi get|on|off [-yes]     show / enable / disable the Wi-Fi radios
+  mesh optimize|reboot|reset Smart Wi-Fi mesh actions (-yes for reboot/reset)
+  status                     model / firmware / serial
+  devices                    connected-device data
   reboot -yes                reboot the box (drops service ~60s)
   raw page <page.htm>        dump all data a page exposes
   raw get <cgi> [-page p]    fetch one cgi data file

@@ -68,20 +68,33 @@ saltctl status                # model / firmware / serial …
 saltctl devices               # connected-device data
 saltctl reboot -yes           # reboot (drops internet & phone ~60s)
 
+# generic settings layer — one command per feature area (see FEATURES.md)
+saltctl areas                 # list all feature areas
+saltctl get lan               # read an area's settings + status
+saltctl get firewall
+saltctl set ddns ddns_enable=1 ddns_hostname=home.example   # change settings
+saltctl set wifi24 Wireless_enable24G=0 -yes                # risky → needs -yes
+saltctl wifi on|off -yes      # both radios
+saltctl mesh optimize         # Smart Wi-Fi mesh action
+
 # escape hatch — any page/endpoint in the UI:
 saltctl raw page firewall_main.htm
-saltctl raw get led -page led_ctrl.htm
-saltctl raw post owl_cmd.cgi -page led_ctrl.htm cmd=setLED target=ALL led_brightness=0
-saltctl raw apply <cmd> -page <page.htm> field=value …
+saltctl raw apply ui_dect_onoff -page tel_dect.htm <field>=<value>
 ```
+
+See **[FEATURES.md](FEATURES.md)** for the full area/feature map, which pages
+are gated behind a higher-privilege account, and the multi-action pages (DECT,
+USB, password, factory reset) that use `raw apply`.
 
 ### Tested vs. spec-only
 
-- **Tested against the live box:** `login`, `led get/off/dim/on/set`,
-  `status`, `raw get/page`, `raw post`.
+- **Tested against the live box:** `login`, `led get/off/dim/on/set`, `status`,
+  `areas`, `get <area>` across areas, **`set` (AES write) verified via a
+  reversible UPnP toggle**, `raw get/page/post`.
 - **Implemented from the UI's JS but not exercised here** (they change live
-  config / restart service): `reboot` and the generic `raw apply` AES path.
-  Try these deliberately.
+  config / restart service): `reboot`, `wifi on/off`, `mesh reboot/reset`, and
+  `set`/`raw apply` on connectivity-affecting areas. Try these deliberately;
+  risky areas require `-yes`.
 
 ## Scheduling (lights off at night)
 
