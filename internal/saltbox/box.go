@@ -9,6 +9,7 @@ package saltbox
 
 import (
 	"fmt"
+	"io"
 	"sort"
 )
 
@@ -124,9 +125,37 @@ type Rebooter interface {
 }
 
 // Backup saves and restores the box's (encrypted) configuration blob.
+// ConfigSave streams the download; the caller must Close the reader.
 type Backup interface {
-	ConfigSave() (data []byte, filename string, err error)
-	ConfigRestore(data []byte, filename string) (string, error)
+	ConfigSave() (r io.ReadCloser, filename string, err error)
+	ConfigRestore(r io.Reader, filename string) (string, error)
+}
+
+// PortForwardRule is one port-forwarding entry. Protocol is tcp|udp|both.
+type PortForwardRule struct {
+	Index                                              int
+	Enabled                                            bool
+	Protocol, InternalIP                               string
+	PublicStart, PublicEnd, PrivateStart, PrivateEnd   int
+}
+
+type PortForward interface {
+	PortForwardList() ([]PortForwardRule, error)
+	PortForwardAdd(r PortForwardRule) (int, error)
+	PortForwardRemove(index int) error
+}
+
+// Reservation is one DHCP static lease.
+type Reservation struct {
+	Index         int
+	MAC, IP, Name string
+	Active        bool
+}
+
+type DHCP interface {
+	DHCPList() ([]Reservation, error)
+	DHCPReserve(mac, ip, name string) (int, error)
+	DHCPRemove(index int) error
 }
 
 // Raw is the escape hatch for anything not wrapped.

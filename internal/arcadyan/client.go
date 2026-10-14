@@ -175,6 +175,21 @@ func (c *Client) GetRaw(path, referer string) (int, string, []byte, error) {
 	return resp.StatusCode, resp.Header.Get("Content-Type"), b, err
 }
 
+// GetStream performs an authenticated GET and returns the live response body
+// (the caller must Close it) plus the status code — for streaming downloads.
+func (c *Client) GetStream(path, referer string) (io.ReadCloser, int, error) {
+	req, _ := http.NewRequest("GET", c.Base+path, nil)
+	req.Header.Set("User-Agent", defaultUA)
+	if referer != "" {
+		req.Header.Set("Referer", c.Base+"/"+strings.TrimLeft(referer, "/"))
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	return resp.Body, resp.StatusCode, nil
+}
+
 // FreshToken loads page and returns its httoken (and a millisecond stamp).
 func (c *Client) FreshToken(page string) (string, string, error) {
 	_, sec, err := c.Page(page)
@@ -186,7 +201,7 @@ func (c *Client) FreshToken(page string) (string, string, error) {
 
 // UploadConfig posts a multipart restore to endpoint (e.g. /upload.cgi):
 // action=AES(cmd), httoken, submit_button=page, and the file under fileField.
-func (c *Client) UploadConfig(endpoint, page, cmd, fileField, fileName string, data []byte) (string, error) {
+func (c *Client) UploadConfig(endpoint, page, cmd, fileField, fileName string, r io.Reader) (string, error) {
 	_, sec, err := c.Page(page)
 	if err != nil {
 		return "", err
@@ -204,7 +219,7 @@ func (c *Client) UploadConfig(endpoint, page, cmd, fileField, fileName string, d
 	if err != nil {
 		return "", err
 	}
-	if _, err := fw.Write(data); err != nil {
+	if _, err := io.Copy(fw, r); err != nil {
 		return "", err
 	}
 	w.Close()

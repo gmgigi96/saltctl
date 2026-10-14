@@ -6,6 +6,7 @@ package fiberbox
 
 import (
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -364,7 +365,7 @@ var bkupFileRe = regexp.MustCompile(`cgi_bkup_file='([^']+)'`)
 // ConfigSave downloads the box's encrypted configuration blob. Loading
 // cgi_sys_bk.js makes the box generate it under /tmp; it is then fetched with
 // the same page token.
-func (b *Box) ConfigSave() ([]byte, string, error) {
+func (b *Box) ConfigSave() (io.ReadCloser, string, error) {
 	tok, ms, err := b.c.FreshToken("system_backup.htm")
 	if err != nil {
 		return nil, "", err
@@ -379,22 +380,189 @@ func (b *Box) ConfigSave() ([]byte, string, error) {
 	}
 	fn := string(m[1])
 	ms2 := fmt.Sprint(time.Now().UnixMilli())
-	code, _, data, err := b.c.GetRaw("/tmp/"+fn+"?_tn="+tok+"&_t="+ms2, "system_backup.htm")
+	body, code, err := b.c.GetStream("/tmp/"+fn+"?_tn="+tok+"&_t="+ms2, "system_backup.htm")
 	if err != nil {
 		return nil, "", err
 	}
-	if code != 200 || len(data) == 0 {
-		return nil, "", fmt.Errorf("download %s: HTTP %d (%d bytes)", fn, code, len(data))
+	if code != 200 {
+		body.Close()
+		return nil, "", fmt.Errorf("download %s: HTTP %d", fn, code)
 	}
-	return data, fn, nil
+	return body, fn, nil
 }
 
 // ConfigRestore uploads a previously saved blob and reboots the box.
-func (b *Box) ConfigRestore(data []byte, name string) (string, error) {
+func (b *Box) ConfigRestore(r io.Reader, name string) (string, error) {
 	if name == "" {
 		name = "restore.cfg"
 	}
-	return b.c.UploadConfig("/upload.cgi", "system_backup.htm", "SYS_PROF", "restore", name, data)
+	return b.c.UploadConfig("/upload.cgi", "system_backup.htm", "SYS_PROF", "restore", name, r)
+}
+
+// --- port forwarding (nat_port_map.htm) ---
+
+const pfRows = 32
+
+func (b *Box) PortForwardList() ([]saltbox.PortForwardRule, error) {
+	cfg, _, err := b.c.PageData("nat_port_map.htm")
+	if err != nil {
+		return nil, err
+	}
+	var out []saltbox.PortForwardRule
+	for i := 0; i < pfRows; i++ {
+		s := strconv.Itoa(i)
+		proto := cfgVal(cfg, "pm_protocol_"+s)
+		if proto != "tcp" && proto != "udp" && proto != "both" {
+			continue
+		}
+		out = append(out, saltbox.PortForwardRule{
+			Index:        i,
+			Enabled:      cfgVal(cfg, "pm_enable_"+s) == "1",
+			Protocol:     proto,
+			InternalIP:   cfgVal(cfg, "pm_private_ip_"+s),
+			PublicStart:  atoi(cfgVal(cfg, "pm_public_port_start_"+s)),
+			PublicEnd:    atoi(cfgVal(cfg, "pm_public_port_end_"+s)),
+			PrivateStart: atoi(cfgVal(cfg, "pm_private_port_start_"+s)),
+			PrivateEnd:   atoi(cfgVal(cfg, "pm_private_port_end_"+s)),
+		})
+	}
+	return out, nil
+}
+
+func (b *Box) PortForwardAdd(r saltbox.PortForwardRule) (int, error) {
+	if r.Protocol != "tcp" && r.Protocol != "udp" && r.Protocol != "both" {
+		return -1, fmt.Errorf("protocol must be tcp, udp or both")
+	}
+	if r.InternalIP == "" || r.PublicStart <= 0 {
+		return -1, fmt.Errorf("need internal IP and a public start port")
+	}
+	if r.PublicEnd <= 0 {
+		r.PublicEnd = r.PublicStart
+	}
+	if r.PrivateStart <= 0 {
+		r.PrivateStart = r.PublicStart
+	}
+	if r.PrivateEnd <= 0 {
+		r.PrivateEnd = r.PrivateStart + (r.PublicEnd - r.PublicStart)
+	}
+	cfg, _, err := b.c.PageData("nat_port_map.htm")
+	if err != nil {
+		return -1, err
+	}
+	idx := -1
+	for i := 0; i < pfRows; i++ {
+		if p := cfgVal(cfg, "pm_protocol_"+strconv.Itoa(i)); p != "tcp" && p != "udp" && p != "both" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return -1, fmt.Errorf("no free port-forward slot (max %d)", pfRows)
+	}
+	s := strconv.Itoa(idx)
+	_, err = b.applyFields("nat_port_map.htm", "ui_firewall", map[string]string{
+		"pm_enable_" + s:             "1",
+		"pm_protocol_" + s:           r.Protocol,
+		"pm_private_ip_" + s:         r.InternalIP,
+		"pm_public_port_start_" + s:  strconv.Itoa(r.PublicStart),
+		"pm_public_port_end_" + s:    strconv.Itoa(r.PublicEnd),
+		"pm_private_port_start_" + s: strconv.Itoa(r.PrivateStart),
+		"pm_private_port_end_" + s:   strconv.Itoa(r.PrivateEnd),
+	})
+	return idx, err
+}
+
+func (b *Box) PortForwardRemove(index int) error {
+	if index < 0 || index >= pfRows {
+		return fmt.Errorf("index out of range 0..%d", pfRows-1)
+	}
+	s := strconv.Itoa(index)
+	_, err := b.applyFields("nat_port_map.htm", "ui_firewall", map[string]string{
+		"pm_enable_" + s: "0", "pm_protocol_" + s: "", "pm_private_ip_" + s: "",
+		"pm_public_port_start_" + s: "", "pm_public_port_end_" + s: "",
+		"pm_private_port_start_" + s: "", "pm_private_port_end_" + s: "",
+	})
+	return err
+}
+
+// --- DHCP static reservations (lan_dhcp_static.htm, bank 0) ---
+
+const dhcpSlots = 20
+
+func (b *Box) DHCPList() ([]saltbox.Reservation, error) {
+	cfg, _, err := b.c.PageData("lan_dhcp_static.htm")
+	if err != nil {
+		return nil, err
+	}
+	var out []saltbox.Reservation
+	for i := 0; i < dhcpSlots; i++ {
+		s := strconv.Itoa(i)
+		mac := cfgVal(cfg, "static_mac_0_"+s)
+		if mac == "" {
+			continue
+		}
+		out = append(out, saltbox.Reservation{
+			Index:  i,
+			MAC:    mac,
+			IP:     cfgVal(cfg, "static_ip_0_"+s),
+			Name:   cfgVal(cfg, "static_name_0_"+s),
+			Active: cfgVal(cfg, "static_active_0_"+s) == "1",
+		})
+	}
+	return out, nil
+}
+
+func (b *Box) DHCPReserve(mac, ip, name string) (int, error) {
+	if mac == "" || ip == "" {
+		return -1, fmt.Errorf("need a MAC and an IP")
+	}
+	cfg, _, err := b.c.PageData("lan_dhcp_static.htm")
+	if err != nil {
+		return -1, err
+	}
+	idx := -1
+	for i := 0; i < dhcpSlots; i++ {
+		if cfgVal(cfg, "static_mac_0_"+strconv.Itoa(i)) == "" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return -1, fmt.Errorf("no free reservation slot (max %d)", dhcpSlots)
+	}
+	s := strconv.Itoa(idx)
+	_, err = b.applyFields("lan_dhcp_static.htm", "ui_dhcp_static", map[string]string{
+		"static_enable":      "1",
+		"static_mac_0_" + s:  mac,
+		"static_ip_0_" + s:   ip,
+		"static_name_0_" + s: name,
+		"static_active_0_" + s: "1",
+	})
+	return idx, err
+}
+
+func (b *Box) DHCPRemove(index int) error {
+	if index < 0 || index >= dhcpSlots {
+		return fmt.Errorf("index out of range 0..%d", dhcpSlots-1)
+	}
+	s := strconv.Itoa(index)
+	_, err := b.applyFields("lan_dhcp_static.htm", "ui_dhcp_static", map[string]string{
+		"static_mac_0_" + s: "", "static_ip_0_" + s: "",
+		"static_name_0_" + s: "", "static_active_0_" + s: "0",
+	})
+	return err
+}
+
+func cfgVal(c *arcadyan.Config, name string) string {
+	if f, ok := c.Lookup(name); ok {
+		return f.Value
+	}
+	return ""
+}
+
+func atoi(s string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(s))
+	return n
 }
 
 // --- raw ---

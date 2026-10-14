@@ -7,6 +7,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -87,6 +88,10 @@ func main() {
 		cmdReboot(dev(), args[1:])
 	case "config":
 		cmdConfig(dev(), args[1:])
+	case "portforward", "pf":
+		cmdPortForward(dev(), args[1:])
+	case "dhcp":
+		cmdDHCP(dev(), args[1:])
 	case "raw":
 		cmdRaw(dev(), args[1:])
 	case "help", "-h", "--help":
@@ -458,18 +463,25 @@ func cmdConfig(dev saltbox.Device, args []string) {
 		fc := flag.NewFlagSet("config save", flag.ExitOnError)
 		out := fc.String("o", "", "output file (default: the box's own name)")
 		fc.Parse(args[1:])
-		data, fn, err := bk.ConfigSave()
+		rc, fn, err := bk.ConfigSave()
 		if err != nil {
 			fatal(err)
 		}
+		defer rc.Close()
 		path := *out
 		if path == "" {
 			path = fn
 		}
-		if err := os.WriteFile(path, data, 0600); err != nil {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if err != nil {
 			fatal(err)
 		}
-		fmt.Printf("saved %d bytes to %s (encrypted config blob)\n", len(data), path)
+		n, err := io.Copy(f, rc)
+		f.Close()
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("saved %d bytes to %s (encrypted config blob)\n", n, path)
 	case "restore":
 		fc := flag.NewFlagSet("config restore", flag.ExitOnError)
 		yes := fc.Bool("yes", false, "confirm (overwrites config and reboots)")
@@ -481,18 +493,161 @@ func cmdConfig(dev saltbox.Device, args []string) {
 		if !*yes {
 			fatal(fmt.Errorf("restore overwrites all settings and reboots the box; re-run with -yes"))
 		}
-		data, err := os.ReadFile(file)
+		f, err := os.Open(file)
 		if err != nil {
 			fatal(err)
 		}
-		body, err := bk.ConfigRestore(data, filepath.Base(file))
+		defer f.Close()
+		body, err := bk.ConfigRestore(f, filepath.Base(file))
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Printf("restore uploaded (%d bytes); box will apply & reboot. %s\n", len(data), respLine(body))
+		fmt.Printf("restore uploaded; box will apply & reboot. %s\n", respLine(body))
 	default:
 		fatal(fmt.Errorf("usage: config save [-o file] | config restore <file> -yes"))
 	}
+}
+
+// ---- port forwarding ----
+
+func cmdPortForward(dev saltbox.Device, args []string) {
+	pf := capOf[saltbox.PortForward](dev)
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "list":
+		rules, err := pf.PortForwardList()
+		if err != nil {
+			fatal(err)
+		}
+		if len(rules) == 0 {
+			fmt.Println("(no port-forwarding rules)")
+			return
+		}
+		fmt.Printf("%-3s %-3s %-5s %-17s %-13s %s\n", "IDX", "EN", "PROTO", "INTERNAL IP", "PUBLIC", "PRIVATE")
+		for _, r := range rules {
+			en := "off"
+			if r.Enabled {
+				en = "on"
+			}
+			fmt.Printf("%-3d %-3s %-5s %-17s %-13s %s\n", r.Index, en, r.Protocol, r.InternalIP,
+				portRange(r.PublicStart, r.PublicEnd), portRange(r.PrivateStart, r.PrivateEnd))
+		}
+	case "add":
+		f := flag.NewFlagSet("pf add", flag.ExitOnError)
+		proto := f.String("proto", "tcp", "tcp|udp|both")
+		ip := f.String("ip", "", "internal (LAN) IP")
+		public := f.String("public", "", "public port or range a-b")
+		private := f.String("private", "", "internal port or range (default = public)")
+		yes := f.Bool("yes", false, "confirm (opens a port from the internet)")
+		f.Parse(args[1:])
+		if !*yes {
+			fatal(fmt.Errorf("port forwarding exposes a service to the internet; re-run with -yes"))
+		}
+		ps, pe := parsePorts(*public)
+		rs, re := parsePorts(*private)
+		idx, err := pf.PortForwardAdd(saltbox.PortForwardRule{
+			Protocol: *proto, InternalIP: *ip,
+			PublicStart: ps, PublicEnd: pe, PrivateStart: rs, PrivateEnd: re,
+		})
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("added port-forward rule at slot %d\n", idx)
+	case "rm":
+		f := flag.NewFlagSet("pf rm", flag.ExitOnError)
+		yes := f.Bool("yes", false, "confirm")
+		f.Parse(args[1:])
+		if !*yes {
+			fatal(fmt.Errorf("re-run with -yes to remove the rule"))
+		}
+		n, err := strconv.Atoi(f.Arg(0))
+		if err != nil {
+			fatal(fmt.Errorf("usage: portforward rm <index> -yes"))
+		}
+		must(pf.PortForwardRemove(n))
+		fmt.Printf("removed port-forward rule %d\n", n)
+	default:
+		fatal(fmt.Errorf("usage: portforward list|add|rm"))
+	}
+}
+
+// ---- dhcp reservations ----
+
+func cmdDHCP(dev saltbox.Device, args []string) {
+	d := capOf[saltbox.DHCP](dev)
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "list":
+		res, err := d.DHCPList()
+		if err != nil {
+			fatal(err)
+		}
+		if len(res) == 0 {
+			fmt.Println("(no DHCP reservations)")
+			return
+		}
+		fmt.Printf("%-3s %-4s %-18s %-16s %s\n", "IDX", "ACT", "MAC", "IP", "NAME")
+		for _, r := range res {
+			act := "off"
+			if r.Active {
+				act = "on"
+			}
+			fmt.Printf("%-3d %-4s %-18s %-16s %s\n", r.Index, act, r.MAC, r.IP, r.Name)
+		}
+	case "reserve":
+		f := flag.NewFlagSet("dhcp reserve", flag.ExitOnError)
+		mac := f.String("mac", "", "device MAC")
+		ip := f.String("ip", "", "IP to assign")
+		name := f.String("name", "", "label (optional)")
+		f.Parse(args[1:])
+		idx, err := d.DHCPReserve(*mac, *ip, *name)
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("reserved %s -> %s at slot %d\n", *mac, *ip, idx)
+	case "rm":
+		n, err := strconv.Atoi(firstArg(args[1:]))
+		if err != nil {
+			fatal(fmt.Errorf("usage: dhcp rm <index>"))
+		}
+		must(d.DHCPRemove(n))
+		fmt.Printf("removed reservation %d\n", n)
+	default:
+		fatal(fmt.Errorf("usage: dhcp list|reserve|rm"))
+	}
+}
+
+// parsePorts parses "80" or "80-90" into (start, end). end=0 when single/empty.
+func parsePorts(s string) (int, int) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, 0
+	}
+	if i := strings.IndexByte(s, '-'); i >= 0 {
+		a, _ := strconv.Atoi(strings.TrimSpace(s[:i]))
+		b, _ := strconv.Atoi(strings.TrimSpace(s[i+1:]))
+		return a, b
+	}
+	n, _ := strconv.Atoi(s)
+	return n, 0
+}
+
+func portRange(a, b int) string {
+	if b > 0 && b != a {
+		return fmt.Sprintf("%d-%d", a, b)
+	}
+	return strconv.Itoa(a)
+}
+
+func firstArg(a []string) string {
+	if len(a) > 0 {
+		return a[0]
+	}
+	return ""
 }
 
 // ---- raw ----
@@ -641,6 +796,8 @@ Commands:
   reboot -yes
   config save [-o file]          download the (encrypted) config
   config restore <file> -yes     upload a saved config (reboots)
+  portforward list|add|rm        port-forwarding rules (add/rm need -yes)
+  dhcp list|reserve|rm           DHCP static reservations
   raw get|post|apply ...         escape hatch for anything else
 
 Example:

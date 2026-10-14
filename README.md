@@ -104,6 +104,14 @@ saltctl reboot -yes
 saltctl config save -o home.cfg     # download the (encrypted) config backup
 saltctl config restore home.cfg -yes
 
+# port forwarding & DHCP reservations
+saltctl portforward list
+saltctl portforward add -proto tcp -ip 192.168.1.50 -public 80 -private 8080 -yes
+saltctl portforward rm 0 -yes
+saltctl dhcp list
+saltctl dhcp reserve -mac AA:BB:CC:DD:EE:FF -ip 192.168.1.50 -name nas
+saltctl dhcp rm 1
+
 # generic layer — a command for every page (see FEATURES.md)
 saltctl areas
 saltctl get firewall
@@ -123,11 +131,13 @@ USB, password, factory reset) that use `raw apply`.
 - **Tested against the live box:** `login`, `models`, `led get/off/dim/on/set`,
   `status`, `devices`, `areas`, `get <area>` across areas, **the AES write path
   (`set` / `upnp on`/`off`) verified via a reversible UPnP toggle**,
-  `config save` (downloads the encrypted blob), `raw get/post`.
+  `config save` (downloads the encrypted blob), `dhcp list/reserve/rm`
+  (verified via a reversible round-trip), `portforward list`, `raw get/post`.
 - **Implemented from the UI's JS but not exercised here** (they change live
   config / restart service): `reboot`, `config restore`, `wifi on/off`,
-  `mesh reboot/reset`, and `set`/`raw apply` on connectivity-affecting areas.
-  Try these deliberately; risky areas require `-yes`.
+  `mesh reboot/reset`, `portforward add/rm`, and `set`/`raw apply` on
+  connectivity-affecting areas. Try these deliberately; risky ones require
+  `-yes`.
 
 ## Scheduling (lights off at night)
 
