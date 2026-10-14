@@ -1,10 +1,15 @@
-# salt-fiber
+# saltctl
 
-A small, dependency-free Go CLI for the **Salt Fiber Box** (Arcadyan
-"Saltbox 1 A 1.0", `BCM68580`) web UI at `http://192.168.1.1`. It reproduces
-the browser's login and request signing so the box can be driven from scripts
+A small, dependency-free Go CLI for **Salt's internet boxes**. It reproduces
+the browser's login and request signing so a box can be driven from scripts
 and schedulers — the original motivation being *turn the status LEDs off at
 night*.
+
+Today it targets the **Salt Fiber Box** (Arcadyan "Saltbox 1 A 1.0",
+`BCM68580`) at `http://192.168.1.1`. The other Salt fibre boxes — **Fiber Box
+X6 / X6 Pro / Wi‑Fi 7+** — share the same Arcadyan "WebBase" UI and should
+work with little or no change; the 5G **GigaBox** is different hardware and
+would need its own backend. Contributions for those are welcome.
 
 ## How it talks to the box
 
@@ -31,9 +36,9 @@ See `crypto.go` and `client.go` for the exact reproduction.
 ## Build
 
 ```sh
-go build -o salt-fiber .
+go build -o saltctl .
 # for andromeda (always-on, on the LAN):
-GOOS=linux GOARCH=arm64 go build -o salt-fiber-linux-arm64 .
+GOOS=linux GOARCH=arm64 go build -o saltctl-linux-arm64 .
 ```
 
 ## Credentials
@@ -42,32 +47,32 @@ The admin password is supplied (never baked in) via, in order of precedence:
 
 1. `-password <pw>`
 2. `-password-file <path>`
-3. `$SALT_FIBER_PASSWORD`
+3. `$SALTCTL_PASSWORD`
 
-`-url` (`$SALT_FIBER_URL`, default `http://192.168.1.1`) and `-user`
-(`$SALT_FIBER_USER`, default `admin`) select the target.
+`-url` (`$SALTCTL_URL`, default `http://192.168.1.1`) and `-user`
+(`$SALTCTL_USER`, default `admin`) select the target.
 
 ## Usage
 
 ```sh
-export SALT_FIBER_PASSWORD='…'
+export SALTCTL_PASSWORD='…'
 
-salt-fiber login                 # verify credentials
-salt-fiber led get               # current brightness per node
-salt-fiber led off               # LEDs off   (brightness 0)
-salt-fiber led dim               # LEDs dim   (brightness 1)
-salt-fiber led on                # LEDs normal(brightness 2)
-salt-fiber led set 0 -target ALL # explicit level / node
+saltctl login                 # verify credentials
+saltctl led get               # current brightness per node
+saltctl led off               # LEDs off   (brightness 0)
+saltctl led dim               # LEDs dim   (brightness 1)
+saltctl led on                # LEDs normal(brightness 2)
+saltctl led set 0 -target ALL # explicit level / node
 
-salt-fiber status                # model / firmware / serial …
-salt-fiber devices               # connected-device data
-salt-fiber reboot -yes           # reboot (drops internet & phone ~60s)
+saltctl status                # model / firmware / serial …
+saltctl devices               # connected-device data
+saltctl reboot -yes           # reboot (drops internet & phone ~60s)
 
 # escape hatch — any page/endpoint in the UI:
-salt-fiber raw page firewall_main.htm
-salt-fiber raw get led -page led_ctrl.htm
-salt-fiber raw post owl_cmd.cgi -page led_ctrl.htm cmd=setLED target=ALL led_brightness=0
-salt-fiber raw apply <cmd> -page <page.htm> field=value …
+saltctl raw page firewall_main.htm
+saltctl raw get led -page led_ctrl.htm
+saltctl raw post owl_cmd.cgi -page led_ctrl.htm cmd=setLED target=ALL led_brightness=0
+saltctl raw apply <cmd> -page <page.htm> field=value …
 ```
 
 ### Tested vs. spec-only
@@ -80,14 +85,14 @@ salt-fiber raw apply <cmd> -page <page.htm> field=value …
 
 ## Scheduling (lights off at night)
 
-`salt-fiber` is stateless — it logs in afresh each run — so any scheduler
+`saltctl` is stateless — it logs in afresh each run — so any scheduler
 works. Examples:
 
 ```sh
 # crontab on an always-on LAN host (e.g. andromeda). Zurich time.
 # off at 23:00, back to normal at 07:00
-0 23 * * *  SALT_FIBER_PASSWORD=$(cat /etc/salt-fiber/pw) /usr/local/bin/salt-fiber led off
-0  7 * * *  SALT_FIBER_PASSWORD=$(cat /etc/salt-fiber/pw) /usr/local/bin/salt-fiber led on
+0 23 * * *  SALTCTL_PASSWORD=$(cat /etc/saltctl/pw) /usr/local/bin/saltctl led off
+0  7 * * *  SALTCTL_PASSWORD=$(cat /etc/saltctl/pw) /usr/local/bin/saltctl led on
 ```
 
 A systemd timer or a Kubernetes `CronJob` work equally well; the password

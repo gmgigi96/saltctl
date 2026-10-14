@@ -1,3 +1,3 @@
-module salt-fiber
+module saltctl
 
 go 1.24

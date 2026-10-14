@@ -1,6 +1,8 @@
-// Command salt-fiber is a small CLI for the Salt Fiber Box (Arcadyan
-// "Saltbox 1 A 1.0") web UI. It reproduces the browser's login and request
-// signing so the box can be driven from scripts and schedulers.
+// Command saltctl is a small CLI for Salt's internet boxes. It reproduces the
+// browser's login and request signing so a box can be driven from scripts and
+// schedulers. Today it targets the Salt Fiber Box (Arcadyan "Saltbox 1 A
+// 1.0"); the other Salt fibre boxes (X6 / X6 Pro / Wi-Fi 7+) share the same
+// Arcadyan web UI, while the 5G GigaBox would need its own backend.
 package main
 
 import (
@@ -14,11 +16,11 @@ import (
 )
 
 func main() {
-	fs := flag.NewFlagSet("salt-fiber", flag.ContinueOnError)
+	fs := flag.NewFlagSet("saltctl", flag.ContinueOnError)
 	fs.Usage = usage
-	url := fs.String("url", envOr("SALT_FIBER_URL", "http://192.168.1.1"), "base URL of the modem")
-	user := fs.String("user", envOr("SALT_FIBER_USER", "admin"), "admin username")
-	pass := fs.String("password", "", "admin password (else $SALT_FIBER_PASSWORD or -password-file)")
+	url := fs.String("url", envOr("SALTCTL_URL", "http://192.168.1.1"), "base URL of the modem")
+	user := fs.String("user", envOr("SALTCTL_USER", "admin"), "admin username")
+	pass := fs.String("password", "", "admin password (else $SALTCTL_PASSWORD or -password-file)")
 	passFile := fs.String("password-file", "", "file containing the admin password")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -253,10 +255,10 @@ func resolvePassword(pass, passFile string) (string, error) {
 		}
 		return strings.TrimRight(string(b), "\r\n"), nil
 	}
-	if v := os.Getenv("SALT_FIBER_PASSWORD"); v != "" {
+	if v := os.Getenv("SALTCTL_PASSWORD"); v != "" {
 		return v, nil
 	}
-	return "", fmt.Errorf("no password: pass -password, -password-file, or set $SALT_FIBER_PASSWORD")
+	return "", fmt.Errorf("no password: pass -password, -password-file, or set $SALTCTL_PASSWORD")
 }
 
 func kvArgs(args []string) map[string]string {
@@ -289,15 +291,15 @@ func fatal(err error) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `salt-fiber - CLI for the Salt Fiber Box (Arcadyan) web UI
+	fmt.Fprint(os.Stderr, `saltctl - CLI for Salt internet boxes (currently the Salt Fiber Box / Arcadyan)
 
 Usage:
-  salt-fiber [global flags] <command> [args]
+  saltctl [global flags] <command> [args]
 
 Global flags:
-  -url            base URL (default http://192.168.1.1, or $SALT_FIBER_URL)
-  -user           admin username (default admin, or $SALT_FIBER_USER)
-  -password       admin password (or $SALT_FIBER_PASSWORD, or -password-file)
+  -url            base URL (default http://192.168.1.1, or $SALTCTL_URL)
+  -user           admin username (default admin, or $SALTCTL_USER)
+  -password       admin password (or $SALTCTL_PASSWORD, or -password-file)
   -password-file  file containing the admin password
 
 Commands:
@@ -314,9 +316,9 @@ Commands:
   raw apply <cmd> k=v...     AES-signed settings POST to apply_abstract.cgi
 
 Examples:
-  export SALT_FIBER_PASSWORD=...
-  salt-fiber led off
-  salt-fiber led on
-  salt-fiber status
+  export SALTCTL_PASSWORD=...
+  saltctl led off
+  saltctl led on
+  saltctl status
 `)
 }
