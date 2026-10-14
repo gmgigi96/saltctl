@@ -139,6 +139,46 @@ USB, password, factory reset) that use `raw apply`.
   connectivity-affecting areas. Try these deliberately; risky ones require
   `-yes`.
 
+## Container image
+
+Each release also publishes a multi-arch image (linux amd64/arm64) to GHCR:
+
+```
+ghcr.io/gmgigi96/saltctl:<version>   # e.g. :0.1.1
+ghcr.io/gmgigi96/saltctl:latest
+```
+
+The entrypoint is `saltctl`, so pass the subcommand as args. Example Kubernetes
+`CronJob` that turns the LEDs off at 23:00 and on at 07:00 (Europe/Zurich):
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: saltctl-led-off
+spec:
+  schedule: "0 23 * * *"
+  timeZone: Europe/Zurich
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: saltctl
+              image: ghcr.io/gmgigi96/saltctl:0.1.1
+              args: ["led", "off"]
+              env:
+                - name: SALTCTL_PASSWORD
+                  valueFrom:
+                    secretKeyRef: { name: salt-fiber, key: password }
+```
+
+A second CronJob at `0 7 * * *` with `args: ["led","on"]` restores them. A Pod
+reaches the router outbound through the node, so this works on a single-node
+cluster. Note: a freshly pushed GHCR package is **private** — make it public
+(repo → Packages → package settings) or add an `imagePullSecret`.
+
 ## Scheduling (lights off at night)
 
 `saltctl` is stateless — it logs in afresh each run — so any scheduler

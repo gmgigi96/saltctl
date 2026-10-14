@@ -38,6 +38,27 @@ archives:
       - FEATURES.md
       - LICENSE
 
+kos:
+  - id: image
+    build: saltctl
+    base_image: gcr.io/distroless/static:nonroot
+    repositories:
+      - ghcr.io/gmgigi96/saltctl
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    tags:
+      - "{{ .Version }}"
+      - latest
+    bare: true
+    preserve_import_paths: false
+    labels:
+      org.opencontainers.image.source: "https://github.com/gmgigi96/saltctl"
+      org.opencontainers.image.description: "CLI for Salt internet boxes (Salt Fiber Box / Arcadyan)"
+      org.opencontainers.image.licenses: "MIT"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
 checksum:
   name_template: checksums.txt
 
