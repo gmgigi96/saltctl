@@ -100,3 +100,7 @@ belongs in a root-only file / Secret, not in the unit or manifest.
 - `reboot`, `raw apply`, and factory-reset-style commands can disrupt service
   — the CLI guards `reboot` behind `-yes` and does not wrap destructive
   settings as first-class commands by design.
+
+## License
+
+[MIT](LICENSE) © 2026 Gianmaria Del Monte.
