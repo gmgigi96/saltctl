@@ -1,27 +1,29 @@
-// Command saltctl is a small CLI for Salt's internet boxes. It reproduces the
-// browser's login and request signing so a box can be driven from scripts and
-// schedulers. Today it targets the Salt Fiber Box (Arcadyan "Saltbox 1 A
-// 1.0"); the other Salt fibre boxes (X6 / X6 Pro / Wi-Fi 7+) share the same
-// Arcadyan web UI, while the 5G GigaBox would need its own backend.
+// Command saltctl is a CLI for Salt's internet boxes. It selects a box model
+// (only "fiberbox", the Salt Fiber Box, is supported today) and drives it
+// through the saltbox capability interfaces, so other Salt models can be added
+// later without changing the CLI.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gmgigi96/saltctl/internal/saltbox"
+	_ "github.com/gmgigi96/saltctl/internal/saltbox/fiberbox" // register the model
 )
 
 func main() {
 	fs := flag.NewFlagSet("saltctl", flag.ContinueOnError)
 	fs.Usage = usage
-	url := fs.String("url", envOr("SALTCTL_URL", "http://192.168.1.1"), "base URL of the modem")
+	url := fs.String("url", envOr("SALTCTL_URL", "http://192.168.1.1"), "base URL of the box")
 	user := fs.String("user", envOr("SALTCTL_USER", "admin"), "admin username")
-	pass := fs.String("password", "", "admin password (else $SALTCTL_PASSWORD or -password-file)")
-	passFile := fs.String("password-file", "", "file containing the admin password")
+	model := fs.String("model", envOr("SALTCTL_MODEL", "fiberbox"), "box model")
+	pass := fs.String("password", "", "admin password (else $SALTCTL_PASSWORD / -password-file)")
+	passFile := fs.String("password-file", "", "file holding the admin password")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -35,41 +37,55 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	newClient := func() *Client {
-		c, err := NewClient(*url, *user, password)
+	dev := func() saltbox.Device {
+		d, err := saltbox.Open(*model, saltbox.Options{URL: *url, User: *user, Pass: password})
 		if err != nil {
 			fatal(err)
 		}
-		if err := c.Login(); err != nil {
+		if err := d.Login(); err != nil {
 			fatal(err)
 		}
-		return c
+		return d
 	}
 
 	switch args[0] {
+	case "models":
+		for _, m := range saltbox.Models() {
+			fmt.Println(m)
+		}
 	case "login":
-		newClient()
-		fmt.Println("login OK")
-	case "led":
-		cmdLED(newClient, args[1:])
-	case "status":
-		cmdDump(newClient(), "router_status.htm")
-	case "devices":
-		cmdDump(newClient(), "clients.htm")
-	case "reboot":
-		cmdReboot(newClient, args[1:])
+		d := dev()
+		fmt.Printf("login OK (%s)\n", d.Model())
 	case "areas":
-		cmdAreas()
+		cmdAreas(dev())
 	case "get":
-		cmdGet(newClient, args[1:])
+		cmdGet(dev(), args[1:])
 	case "set":
-		cmdSet(newClient, args[1:])
+		cmdSet(dev(), args[1:])
+	case "status":
+		cmdGet(dev(), []string{"modem"})
+	case "devices":
+		cmdGet(dev(), []string{"devices"})
+	case "led":
+		cmdLED(dev(), args[1:])
 	case "wifi":
-		cmdWifi(newClient, args[1:])
+		cmdWiFi(dev(), args[1:])
+	case "guest":
+		cmdGuest(dev(), args[1:])
+	case "dect":
+		cmdDECT(dev(), args[1:])
+	case "ddns":
+		cmdDDNS(dev(), args[1:])
+	case "dmz":
+		cmdDMZ(dev(), args[1:])
+	case "upnp":
+		cmdToggle(dev(), "upnp", args[1:])
 	case "mesh":
-		cmdMesh(newClient, args[1:])
+		cmdMesh(dev(), args[1:])
+	case "reboot":
+		cmdReboot(dev(), args[1:])
 	case "raw":
-		cmdRaw(newClient, args[1:])
+		cmdRaw(dev(), args[1:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -79,22 +95,114 @@ func main() {
 	}
 }
 
+// capOf returns the capability T of dev, or exits if unsupported.
+func capOf[T any](dev saltbox.Device) T {
+	v, ok := dev.(T)
+	if !ok {
+		fatal(fmt.Errorf("%s does not support this feature", dev.Model()))
+	}
+	return v
+}
+
+// ---- settings: areas / get / set ----
+
+func cmdAreas(dev saltbox.Device) {
+	s := capOf[saltbox.Settings](dev)
+	fmt.Printf("%-18s %-4s %s\n", "AREA", "RW", "DESCRIPTION")
+	for _, a := range s.Areas() {
+		rw := "r"
+		if a.Writable {
+			rw = "rw"
+		}
+		risk := ""
+		if a.Risky {
+			risk = "  [risky]"
+		}
+		fmt.Printf("%-18s %-4s %s%s\n", a.Name, rw, a.Desc, risk)
+	}
+}
+
+func cmdGet(dev saltbox.Device, args []string) {
+	if len(args) == 0 {
+		fatal(fmt.Errorf("usage: get <area>  (see `areas`)"))
+	}
+	s := capOf[saltbox.Settings](dev)
+	fields, reads, err := s.GetArea(args[0])
+	if err != nil {
+		fatal(err)
+	}
+	if len(fields) > 0 {
+		fmt.Printf("# %s — editable (name = value)\n", args[0])
+		for _, f := range fields {
+			fmt.Printf("%-30s = %s\n", f.Name, f.Value)
+		}
+	}
+	cgis := make([]string, 0, len(reads))
+	for k := range reads {
+		cgis = append(cgis, k)
+	}
+	sort.Strings(cgis)
+	for _, cgi := range cgis {
+		if len(reads[cgi]) == 0 {
+			continue
+		}
+		fmt.Printf("# %s — read-only (cgi_%s.js)\n", args[0], cgi)
+		for _, v := range reads[cgi] {
+			fmt.Printf("%-30s = %s\n", v.Name, v.Value)
+		}
+	}
+}
+
+func cmdSet(dev saltbox.Device, args []string) {
+	fss := flag.NewFlagSet("set", flag.ExitOnError)
+	yes := fss.Bool("yes", false, "confirm a risky area change")
+	fss.Parse(args)
+	rest := fss.Args()
+	if len(rest) < 2 {
+		fatal(fmt.Errorf("usage: set <area> name=value ...  (see `areas`)"))
+	}
+	changes := kvArgs(rest[1:])
+	if len(changes) == 0 {
+		fatal(fmt.Errorf("no name=value pairs given"))
+	}
+	for k, v := range changes {
+		fmt.Printf("  %s -> %q\n", k, v)
+	}
+	body, err := capOf[saltbox.Settings](dev).SetArea(rest[0], changes, *yes)
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("applied. %s\n", respLine(body))
+}
+
 // ---- led ----
 
-var ledBrightness = map[int]string{0: "Off", 1: "Dim", 2: "Normal"}
+var ledNames = map[int]string{0: "Off", 1: "Dim", 2: "Normal"}
 
-func cmdLED(newClient func() *Client, args []string) {
+func cmdLED(dev saltbox.Device, args []string) {
+	l := capOf[saltbox.LED](dev)
 	fsL := flag.NewFlagSet("led", flag.ExitOnError)
-	target := fsL.String("target", "ALL", `which node: "ALL" or a MAC`)
+	target := fsL.String("target", "ALL", `"ALL" or a MAC`)
 	fsL.Parse(args)
 	sub := "get"
 	if fsL.NArg() > 0 {
 		sub = fsL.Arg(0)
 	}
-	var level int
+	level := -1
 	switch sub {
 	case "get":
-		printLEDStatus(newClient())
+		nodes, err := l.LEDStatus()
+		if err != nil {
+			fatal(err)
+		}
+		fmt.Printf("%-18s %-18s %s\n", "NODE", "MAC", "BRIGHTNESS")
+		for _, n := range nodes {
+			name := ledNames[n.Level]
+			if name == "" {
+				name = strconv.Itoa(n.Level)
+			}
+			fmt.Printf("%-18s %-18s %s\n", n.Name, n.MAC, name)
+		}
 		return
 	case "off":
 		level = 0
@@ -108,312 +216,292 @@ func cmdLED(newClient func() *Client, args []string) {
 		}
 		n, err := strconv.Atoi(fsL.Arg(1))
 		if err != nil || n < 0 || n > 2 {
-			fatal(fmt.Errorf("brightness must be 0 (Off), 1 (Dim) or 2 (Normal)"))
+			fatal(fmt.Errorf("level must be 0 (Off), 1 (Dim) or 2 (Normal)"))
 		}
 		level = n
 	default:
-		fatal(fmt.Errorf("unknown led subcommand %q (get|on|off|dim|set)", sub))
+		fatal(fmt.Errorf("usage: led get|on|off|dim|set <0|1|2>"))
 	}
-
-	c := newClient()
-	body, err := c.PostSimple("/owl_cmd.cgi", "led_ctrl.htm", map[string]string{
-		"cmd":           "setLED",
-		"target":        *target,
-		"led_brightness": strconv.Itoa(level),
-	})
-	if err != nil {
+	if err := l.SetLED(*target, level); err != nil {
 		fatal(err)
 	}
-	if !strings.Contains(body, `"OK"`) {
-		fatal(fmt.Errorf("unexpected response: %s", strings.TrimSpace(body)))
-	}
-	fmt.Printf("LED -> %s (target %s)\n", ledBrightness[level], *target)
+	fmt.Printf("LED -> %s (target %s)\n", ledNames[level], *target)
 }
 
-var ledStatusRe = regexp.MustCompile(`led_status\s*=\s*"([^"]*)"`)
+// ---- wifi ----
 
-func printLEDStatus(c *Client) {
-	js, err := c.GetCGI("led", "led_ctrl.htm")
-	if err != nil {
-		fatal(err)
-	}
-	m := ledStatusRe.FindStringSubmatch(js)
-	if m == nil {
-		fatal(fmt.Errorf("led_status not found in response"))
-	}
-	fmt.Printf("%-20s %-18s %s\n", "NODE", "MAC", "BRIGHTNESS")
-	for _, entry := range strings.Split(m[1], ",") {
-		p := strings.Split(entry, "@")
-		if len(p) < 3 {
-			continue
-		}
-		b, _ := strconv.Atoi(p[2])
-		name := ledBrightness[b]
-		if name == "" {
-			name = p[2]
-		}
-		fmt.Printf("%-20s %-18s %s\n", p[1], p[0], name)
-	}
-}
-
-// ---- reboot ----
-
-func cmdReboot(newClient func() *Client, args []string) {
-	fsR := flag.NewFlagSet("reboot", flag.ExitOnError)
-	yes := fsR.Bool("yes", false, "confirm; reboot drops internet/phone for ~60s")
-	fsR.Parse(args)
-	if !*yes {
-		fatal(fmt.Errorf("refusing without -yes (reboot drops internet & phone for ~60s)"))
-	}
-	body, err := newClient().Apply("reboot", "system_r.htm", nil)
-	if err != nil {
-		fatal(err)
-	}
-	fmt.Printf("reboot requested; box restarting. response: %s\n", strings.TrimSpace(firstLine(body)))
-}
-
-// ---- areas / get / set (generic settings layer) ----
-
-func cmdAreas() {
-	fmt.Printf("%-18s %-4s %s\n", "AREA", "RW", "DESCRIPTION")
-	for _, a := range areas {
-		rw := "r"
-		if a.Cmd != "" {
-			rw = "rw"
-		}
-		risk := ""
-		if a.Risky {
-			risk = "  [risky: can drop connectivity]"
-		}
-		fmt.Printf("%-18s %-4s %s%s\n", a.Name, rw, a.Desc, risk)
-	}
-	fmt.Println("\nget <area>            read an area's settings")
-	fmt.Println("set <area> k=v ...    change settings (writable areas; -yes for risky)")
-}
-
-func cmdGet(newClient func() *Client, args []string) {
-	if len(args) == 0 {
-		fatal(fmt.Errorf("usage: get <area>   (see `areas`)"))
-	}
-	a, ok := findArea(args[0])
-	if !ok {
-		fatal(fmt.Errorf("unknown area %q (see `areas`)", args[0]))
-	}
-	cfg, reads, err := newClient().PageData(a.Page)
-	if err != nil {
-		fatal(err)
-	}
-	if len(cfg.Fields) > 0 {
-		fmt.Printf("# %s — editable settings (name = value)\n", a.Name)
-		for _, f := range cfg.Fields {
-			fmt.Printf("%-30s = %s\n", f.Name, f.Value)
-		}
-	}
-	for cgi, vars := range reads {
-		if len(vars) == 0 {
-			continue
-		}
-		fmt.Printf("# %s — read-only (cgi_%s.js)\n", a.Name, cgi)
-		for _, v := range vars {
-			fmt.Printf("%-30s = %s\n", v.Key, v.Val)
-		}
-	}
-}
-
-func cmdSet(newClient func() *Client, args []string) {
-	fss := flag.NewFlagSet("set", flag.ExitOnError)
-	yes := fss.Bool("yes", false, "confirm a change to a risky area")
-	fss.Parse(args)
-	rest := fss.Args()
-	if len(rest) < 2 {
-		fatal(fmt.Errorf("usage: set <area> name=value ...   (see `areas`)"))
-	}
-	a, ok := findArea(rest[0])
-	if !ok {
-		fatal(fmt.Errorf("unknown area %q (see `areas`)", rest[0]))
-	}
-	if a.Cmd == "" {
-		fatal(fmt.Errorf("area %q is read-only here; use `raw apply` for its actions", a.Name))
-	}
-	if a.Risky && !*yes {
-		fatal(fmt.Errorf("area %q can drop connectivity; re-run with -yes", a.Name))
-	}
-	pairs := kvArgs(rest[1:])
-	if len(pairs) == 0 {
-		fatal(fmt.Errorf("no name=value pairs given"))
-	}
-	c := newClient()
-	cfg, _, err := c.PageData(a.Page)
-	if err != nil {
-		fatal(err)
-	}
-	changes := map[string]string{}
-	for name, val := range pairs {
-		f, ok := cfg.lookup(name)
-		if !ok {
-			fatal(fmt.Errorf("unknown setting %q for area %s (try `get %s`)", name, a.Name, a.Name))
-		}
-		changes[f.ID] = val
-		fmt.Printf("  %s (%s): %q -> %q\n", name, f.ID, f.Value, val)
-	}
-	body, err := c.Apply(a.Cmd, a.Page, changes)
-	if err != nil {
-		fatal(err)
-	}
-	fmt.Printf("applied (cmd=%s). response: %s\n", a.Cmd, strings.TrimSpace(firstLine(body)))
-}
-
-// ---- wifi / mesh convenience ----
-
-func cmdWifi(newClient func() *Client, args []string) {
+func cmdWiFi(dev saltbox.Device, args []string) {
 	fsw := flag.NewFlagSet("wifi", flag.ExitOnError)
-	yes := fsw.Bool("yes", false, "confirm enabling/disabling Wi-Fi")
+	band := fsw.String("band", "both", "24, 5, or both")
+	yes := fsw.Bool("yes", false, "confirm enabling/disabling radios")
 	fsw.Parse(args)
 	sub := "get"
 	if fsw.NArg() > 0 {
 		sub = fsw.Arg(0)
 	}
+	if sub == "get" {
+		cmdGet(dev, []string{"wifi"})
+		return
+	}
+	w := capOf[saltbox.WiFi](dev)
+	bands := bandList(*band)
 	switch sub {
-	case "get":
-		cmdGet(newClient, []string{"wifi"})
 	case "on", "off":
 		if !*yes {
 			fatal(fmt.Errorf("`wifi %s` changes the radios; re-run with -yes", sub))
 		}
-		val := "1"
-		if sub == "off" {
-			val = "0"
+		for _, bnd := range bands {
+			must(w.SetRadio(bnd, sub == "on"))
+			fmt.Printf("radio %s -> %s\n", bnd, sub)
 		}
-		c := newClient()
-		for _, pair := range [][2]string{{"wifi24", "Wireless_enable24G"}, {"wifi5", "Wireless_enable5G"}} {
-			a, _ := findArea(pair[0])
-			cfg, _, err := c.PageData(a.Page)
-			if err != nil {
-				fatal(err)
-			}
-			f, ok := cfg.lookup(pair[1])
-			if !ok {
-				fatal(fmt.Errorf("%s: field %s not found", pair[0], pair[1]))
-			}
-			if _, err := c.Apply(a.Cmd, a.Page, map[string]string{f.ID: val}); err != nil {
-				fatal(err)
-			}
-			fmt.Printf("%s %s -> %s\n", pair[0], pair[1], val)
+	case "ssid":
+		v := fsw.Arg(1)
+		if v == "" {
+			fatal(fmt.Errorf("usage: wifi ssid <name> [-band 24|5|both]"))
+		}
+		for _, bnd := range bands {
+			must(w.SetSSID(bnd, v))
+			fmt.Printf("ssid %s -> %q\n", bnd, v)
+		}
+	case "password":
+		v := fsw.Arg(1)
+		if len(v) < 8 {
+			fatal(fmt.Errorf("Wi-Fi password must be at least 8 characters"))
+		}
+		for _, bnd := range bands {
+			must(w.SetWiFiPassword(bnd, v))
+			fmt.Printf("password %s updated\n", bnd)
+		}
+	case "channel":
+		n, err := strconv.Atoi(fsw.Arg(1))
+		if err != nil {
+			fatal(fmt.Errorf("usage: wifi channel <n|0=auto> [-band 24|5]"))
+		}
+		for _, bnd := range bands {
+			must(w.SetChannel(bnd, n))
+			fmt.Printf("channel %s -> %d\n", bnd, n)
 		}
 	default:
-		fatal(fmt.Errorf("usage: wifi [get|on|off]"))
+		fatal(fmt.Errorf("usage: wifi get|on|off|ssid|password|channel"))
 	}
 }
 
-func cmdMesh(newClient func() *Client, args []string) {
+// ---- guest ----
+
+func cmdGuest(dev saltbox.Device, args []string) {
+	fsg := flag.NewFlagSet("guest", flag.ExitOnError)
+	band := fsg.String("band", "both", "24, 5, or both")
+	fsg.Parse(args)
+	if fsg.NArg() == 0 {
+		cmdGet(dev, []string{"guest"})
+		return
+	}
+	g := capOf[saltbox.Guest](dev)
+	switch fsg.Arg(0) {
+	case "on", "off":
+		must(g.SetGuest(fsg.Arg(0) == "on"))
+		fmt.Printf("guest Wi-Fi -> %s\n", fsg.Arg(0))
+	case "ssid":
+		for _, bnd := range bandList(*band) {
+			must(g.SetGuestSSID(bnd, fsg.Arg(1)))
+			fmt.Printf("guest ssid %s -> %q\n", bnd, fsg.Arg(1))
+		}
+	case "password":
+		if len(fsg.Arg(1)) < 8 {
+			fatal(fmt.Errorf("password must be at least 8 characters"))
+		}
+		for _, bnd := range bandList(*band) {
+			must(g.SetGuestPassword(bnd, fsg.Arg(1)))
+			fmt.Printf("guest password %s updated\n", bnd)
+		}
+	default:
+		fatal(fmt.Errorf("usage: guest on|off|ssid <name>|password <pw>"))
+	}
+}
+
+// ---- dect / ddns / dmz / upnp ----
+
+func cmdDECT(dev saltbox.Device, args []string) {
+	d := capOf[saltbox.DECT](dev)
 	if len(args) == 0 {
-		fatal(fmt.Errorf("usage: mesh <optimize|reboot|reset> [-yes]"))
+		cmdGet(dev, []string{"dect"})
+		return
+	}
+	switch args[0] {
+	case "on":
+		must(d.SetDECT(true))
+		fmt.Println("DECT -> on")
+	case "off":
+		must(d.SetDECT(false))
+		fmt.Println("DECT -> off")
+	case "eco":
+		on := len(args) > 1 && args[1] == "on"
+		must(d.SetDECTEco(on))
+		fmt.Printf("DECT eco -> %v\n", on)
+	default:
+		fatal(fmt.Errorf("usage: dect on|off|eco on|off"))
+	}
+}
+
+func cmdDDNS(dev saltbox.Device, args []string) {
+	fsd := flag.NewFlagSet("ddns", flag.ExitOnError)
+	svc := fsd.String("service", "", "provider, e.g. dyndns")
+	host := fsd.String("host", "", "hostname")
+	user := fsd.String("user", "", "username")
+	pw := fsd.String("pass", "", "password")
+	fsd.Parse(args)
+	d := capOf[saltbox.DDNS](dev)
+	switch fsd.Arg(0) {
+	case "", "get":
+		cmdGet(dev, []string{"ddns"})
+	case "off":
+		must(d.SetDDNS(false, "", "", "", ""))
+		fmt.Println("DDNS -> off")
+	case "set":
+		must(d.SetDDNS(true, *svc, *host, *user, *pw))
+		fmt.Println("DDNS -> on")
+	default:
+		fatal(fmt.Errorf("usage: ddns get|off|set -service X -host H [-user U -pass P]"))
+	}
+}
+
+func cmdDMZ(dev saltbox.Device, args []string) {
+	fsz := flag.NewFlagSet("dmz", flag.ExitOnError)
+	yes := fsz.Bool("yes", false, "confirm (exposes a host to the internet)")
+	fsz.Parse(args)
+	d := capOf[saltbox.DMZ](dev)
+	switch fsz.Arg(0) {
+	case "", "get":
+		cmdGet(dev, []string{"firewall-dmz"})
+	case "off":
+		must(d.SetDMZ(""))
+		fmt.Println("DMZ -> off")
+	case "set":
+		if !*yes {
+			fatal(fmt.Errorf("DMZ exposes a host to the internet; re-run with -yes"))
+		}
+		ip := fsz.Arg(1)
+		if ip == "" {
+			fatal(fmt.Errorf("usage: dmz set <lan-ip> -yes"))
+		}
+		must(d.SetDMZ(ip))
+		fmt.Printf("DMZ -> %s\n", ip)
+	default:
+		fatal(fmt.Errorf("usage: dmz get|off|set <ip> -yes"))
+	}
+}
+
+func cmdToggle(dev saltbox.Device, which string, args []string) {
+	// only upnp today
+	u := capOf[saltbox.UPnP](dev)
+	if len(args) == 0 || args[0] == "get" {
+		cmdGet(dev, []string{which})
+		return
+	}
+	switch args[0] {
+	case "on":
+		must(u.SetUPnP(true))
+		fmt.Println("UPnP -> on")
+	case "off":
+		must(u.SetUPnP(false))
+		fmt.Println("UPnP -> off")
+	default:
+		fatal(fmt.Errorf("usage: %s on|off|get", which))
+	}
+}
+
+// ---- mesh / reboot ----
+
+func cmdMesh(dev saltbox.Device, args []string) {
+	if len(args) == 0 {
+		fatal(fmt.Errorf("usage: mesh optimize|reboot|reset [-yes]"))
 	}
 	fsm := flag.NewFlagSet("mesh", flag.ExitOnError)
 	yes := fsm.Bool("yes", false, "confirm reboot/reset")
 	fsm.Parse(args[1:])
-	var cmd string
-	switch args[0] {
-	case "optimize":
-		cmd = "getdiscoptimising"
-	case "reboot":
-		cmd = "reboot"
-	case "reset":
-		cmd = "reset"
-	default:
-		fatal(fmt.Errorf("usage: mesh <optimize|reboot|reset>"))
-	}
-	if (cmd == "reboot" || cmd == "reset") && !*yes {
+	if (args[0] == "reboot" || args[0] == "reset") && !*yes {
 		fatal(fmt.Errorf("`mesh %s` is disruptive; re-run with -yes", args[0]))
 	}
-	body, err := newClient().PostSimple("/owl_cmd.cgi", "owl_discs.htm", map[string]string{"cmd": cmd})
+	body, err := capOf[saltbox.Mesh](dev).MeshAction(args[0])
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("mesh %s -> %s\n", args[0], strings.TrimSpace(firstLine(body)))
+	fmt.Printf("mesh %s -> %s\n", args[0], respLine(body))
 }
 
-// ---- raw (escape hatch for any feature) ----
+func cmdReboot(dev saltbox.Device, args []string) {
+	fsr := flag.NewFlagSet("reboot", flag.ExitOnError)
+	yes := fsr.Bool("yes", false, "confirm (drops internet & phone ~60s)")
+	fsr.Parse(args)
+	if !*yes {
+		fatal(fmt.Errorf("reboot drops internet & phone ~60s; re-run with -yes"))
+	}
+	body, err := capOf[saltbox.Rebooter](dev).Reboot()
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("reboot requested. %s\n", respLine(body))
+}
 
-func cmdRaw(newClient func() *Client, args []string) {
+// ---- raw ----
+
+func cmdRaw(dev saltbox.Device, args []string) {
+	r := capOf[saltbox.Raw](dev)
 	if len(args) == 0 {
-		fatal(fmt.Errorf("usage: raw <page|get|post|apply> ..."))
+		fatal(fmt.Errorf("usage: raw get|post|apply ..."))
 	}
 	switch args[0] {
-	case "page":
-		if len(args) < 2 {
-			fatal(fmt.Errorf("usage: raw page <page.htm>"))
-		}
-		cmdDump(newClient(), args[1])
 	case "get":
 		if len(args) < 2 {
-			fatal(fmt.Errorf("usage: raw get <cgiName> [-page referer.htm]"))
+			fatal(fmt.Errorf("usage: raw get <cgi> [-page p.htm]"))
 		}
-		fsg := flag.NewFlagSet("raw get", flag.ExitOnError)
-		page := fsg.String("page", args[1]+".htm", "referer page for the fresh token")
-		fsg.Parse(args[2:])
-		js, err := newClient().GetCGI(args[1], *page)
+		f := flag.NewFlagSet("raw get", flag.ExitOnError)
+		page := f.String("page", args[1]+".htm", "referer page")
+		f.Parse(args[2:])
+		out, err := r.RawGet(args[1], *page)
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Print(js)
+		fmt.Print(out)
 	case "post":
 		if len(args) < 2 {
-			fatal(fmt.Errorf(`usage: raw post <endpoint> [-page p.htm] k=v ...`))
+			fatal(fmt.Errorf("usage: raw post <endpoint> [-page p] k=v ..."))
 		}
-		fsp := flag.NewFlagSet("raw post", flag.ExitOnError)
-		page := fsp.String("page", "index.htm", "referer page for the fresh token")
-		fsp.Parse(args[2:])
-		body, err := newClient().PostSimple(args[1], *page, kvArgs(fsp.Args()))
+		f := flag.NewFlagSet("raw post", flag.ExitOnError)
+		page := f.String("page", "index.htm", "referer page")
+		f.Parse(args[2:])
+		out, err := r.RawPost(args[1], *page, kvArgs(f.Args()))
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Print(body)
+		fmt.Print(out)
 	case "apply":
 		if len(args) < 2 {
-			fatal(fmt.Errorf(`usage: raw apply <cmd> [-page p.htm] field=value ...`))
+			fatal(fmt.Errorf("usage: raw apply <cmd> [-page p] field=value ..."))
 		}
-		fsa := flag.NewFlagSet("raw apply", flag.ExitOnError)
-		page := fsa.String("page", "index.htm", "submit_button / referer page")
-		fsa.Parse(args[2:])
-		body, err := newClient().Apply(args[1], *page, kvArgs(fsa.Args()))
+		f := flag.NewFlagSet("raw apply", flag.ExitOnError)
+		page := f.String("page", "index.htm", "submit_button / referer page")
+		f.Parse(args[2:])
+		out, err := r.RawApply(args[1], *page, kvArgs(f.Args()))
 		if err != nil {
 			fatal(err)
 		}
-		fmt.Print(body)
+		fmt.Print(out)
 	default:
 		fatal(fmt.Errorf("unknown raw subcommand %q", args[0]))
 	}
 }
 
-// cmdDump loads a page, fetches every cgi data file it declares, and prints the
-// parsed variables. This exposes read data for any page in the UI.
-func cmdDump(c *Client, page string) {
-	body, _, err := c.page(page)
-	if err != nil {
-		fatal(err)
-	}
-	cgis := pageCGIs(body)
-	if len(cgis) == 0 {
-		fmt.Fprintf(os.Stderr, "(%s declares no cgi data files)\n", page)
-		return
-	}
-	for _, name := range cgis {
-		js, err := c.GetCGI(name, page)
-		if err != nil {
-			fmt.Printf("# cgi_%s.js: %v\n", name, err)
-			continue
-		}
-		vars := parseVars(js)
-		sort.SliceStable(vars, func(i, j int) bool { return vars[i].Key < vars[j].Key })
-		fmt.Printf("# ---- cgi_%s.js ----\n", name)
-		for _, v := range vars {
-			fmt.Printf("%-28s = %s\n", v.Key, v.Val)
-		}
+// ---- helpers ----
+
+func bandList(band string) []string {
+	switch band {
+	case "both", "":
+		return []string{"24", "5"}
+	default:
+		return []string{band}
 	}
 }
-
-// ---- helpers ----
 
 func resolvePassword(pass, passFile string) (string, error) {
 	if pass != "" {
@@ -449,11 +537,21 @@ func envOr(key, def string) string {
 	return def
 }
 
-func firstLine(s string) string {
+func respLine(body string) string {
+	s := strings.TrimSpace(body)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
+		s = s[:i]
 	}
-	return s
+	if s == "" {
+		return "(empty response)"
+	}
+	return "response: " + s
+}
+
+func must(err error) {
+	if err != nil {
+		fatal(err)
+	}
 }
 
 func fatal(err error) {
@@ -462,38 +560,39 @@ func fatal(err error) {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `saltctl - CLI for Salt internet boxes (currently the Salt Fiber Box / Arcadyan)
+	fmt.Fprint(os.Stderr, `saltctl - CLI for Salt internet boxes (model: fiberbox = Salt Fiber Box)
 
 Usage:
   saltctl [global flags] <command> [args]
 
 Global flags:
-  -url            base URL (default http://192.168.1.1, or $SALTCTL_URL)
-  -user           admin username (default admin, or $SALTCTL_USER)
-  -password       admin password (or $SALTCTL_PASSWORD, or -password-file)
-  -password-file  file containing the admin password
+  -url / $SALTCTL_URL            base URL (default http://192.168.1.1)
+  -user / $SALTCTL_USER          admin username (default admin)
+  -model / $SALTCTL_MODEL        box model (default fiberbox)
+  -password / -password-file     admin password (or $SALTCTL_PASSWORD)
 
 Commands:
-  login                      verify credentials
-  areas                      list feature areas (what get/set can target)
-  get <area>                 read an area's settings + status
-  set <area> k=v ... [-yes]  change settings (writable areas; -yes if risky)
-  led get|off|dim|on         LED brightness (Off/Dim/Normal)
-  led set <0|1|2> [-target]  set a specific LED level
-  wifi get|on|off [-yes]     show / enable / disable the Wi-Fi radios
-  mesh optimize|reboot|reset Smart Wi-Fi mesh actions (-yes for reboot/reset)
-  status                     model / firmware / serial
-  devices                    connected-device data
-  reboot -yes                reboot the box (drops service ~60s)
-  raw page <page.htm>        dump all data a page exposes
-  raw get <cgi> [-page p]    fetch one cgi data file
-  raw post <endpoint> k=v... plaintext form POST (+ httoken)
-  raw apply <cmd> k=v...     AES-signed settings POST to apply_abstract.cgi
+  models                         list supported box models
+  login                          verify credentials
+  status | devices               model/firmware | connected devices
+  areas                          list feature areas
+  get <area>                     read an area's settings
+  set <area> k=v ... [-yes]      change settings (risky areas need -yes)
+  led get|off|dim|on|set <0-2>   LED brightness
+  wifi get|on|off|ssid|password|channel [-band 24|5|both] [-yes]
+  guest on|off|ssid <n>|password <pw> [-band]
+  dect on|off|eco on|off
+  ddns get|off|set -service S -host H [-user U -pass P]
+  dmz get|off|set <ip> -yes
+  upnp get|on|off
+  mesh optimize|reboot|reset [-yes]
+  reboot -yes
+  raw get|post|apply ...         escape hatch for anything else
 
-Examples:
+Example:
   export SALTCTL_PASSWORD=...
   saltctl led off
-  saltctl led on
-  saltctl status
+  saltctl wifi ssid MyHome -band both
+  saltctl set ddns ddns_enable=1    # or:  saltctl ddns set -host home.example
 `)
 }

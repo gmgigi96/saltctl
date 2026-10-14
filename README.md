@@ -31,7 +31,27 @@ mimics exactly what the web UI's JavaScript does:
   field are **AES-256-CBC** encrypted (key/iv = the ASCII bytes above,
   zero-padded, rendered `%xx%xx…`), plus `httoken` and `submit_button=<page>`.
 
-See `crypto.go` and `client.go` for the exact reproduction.
+See `internal/arcadyan/` for the exact reproduction.
+
+## Architecture
+
+The code is structured so other Salt boxes can be added later without touching
+the CLI:
+
+```
+main.go                         the CLI (flags, subcommands)
+internal/arcadyan/              Arcadyan "WebBase" protocol (model-agnostic):
+                                login, token, AES signing, get/apply, config
+internal/saltbox/               Device + capability interfaces + model registry
+internal/saltbox/fiberbox/      the Salt Fiber Box model (areas + features)
+```
+
+A model registers itself (`saltbox.Register`) and implements `Device` plus the
+capability interfaces it supports (`LED`, `WiFi`, `DDNS`, `Settings`, …). The
+CLI selects a model (`-model`, default `fiberbox`) and type-asserts the
+capability each command needs. Adding the Fiber Box X6 or the 5G GigaBox later
+is a new package under `internal/saltbox/` that registers itself — no CLI
+changes. **`fiberbox` is the only supported model today.**
 
 ## Build
 
@@ -57,29 +77,39 @@ The admin password is supplied (never baked in) via, in order of precedence:
 ```sh
 export SALTCTL_PASSWORD='…'
 
-saltctl login                 # verify credentials
-saltctl led get               # current brightness per node
-saltctl led off               # LEDs off   (brightness 0)
-saltctl led dim               # LEDs dim   (brightness 1)
-saltctl led on                # LEDs normal(brightness 2)
-saltctl led set 0 -target ALL # explicit level / node
+saltctl login                       # verify credentials
+saltctl status                      # model / firmware / serial
+saltctl devices                     # connected devices
 
-saltctl status                # model / firmware / serial …
-saltctl devices               # connected-device data
-saltctl reboot -yes           # reboot (drops internet & phone ~60s)
+# LED
+saltctl led off | dim | on          # 0 / 1 / 2
+saltctl led get
 
-# generic settings layer — one command per feature area (see FEATURES.md)
-saltctl areas                 # list all feature areas
-saltctl get lan               # read an area's settings + status
+# Wi-Fi (friendly wrappers; -band 24|5|both, default both)
+saltctl wifi ssid MyHome
+saltctl wifi password 's3cret-pass'
+saltctl wifi channel 36 -band 5
+saltctl wifi off -yes               # disable radios (needs -yes)
+saltctl guest on
+saltctl guest ssid Visitors
+
+# services
+saltctl ddns set -service dyndns -host home.example -user u -pass p
+saltctl dmz set 192.168.1.50 -yes   # expose a host (needs -yes)
+saltctl dmz off
+saltctl upnp on | off
+saltctl dect on | off
+saltctl mesh optimize               # reboot|reset need -yes
+saltctl reboot -yes
+
+# generic layer — a command for every page (see FEATURES.md)
+saltctl areas
 saltctl get firewall
-saltctl set ddns ddns_enable=1 ddns_hostname=home.example   # change settings
-saltctl set wifi24 Wireless_enable24G=0 -yes                # risky → needs -yes
-saltctl wifi on|off -yes      # both radios
-saltctl mesh optimize         # Smart Wi-Fi mesh action
+saltctl set portforward pm_enable_0=1 pm_protocol_0=tcp pm_private_ip_0=192.168.1.50 \
+    pm_private_port_start_0=80 pm_public_port_start_0=8080
 
-# escape hatch — any page/endpoint in the UI:
-saltctl raw page firewall_main.htm
-saltctl raw apply ui_dect_onoff -page tel_dect.htm <field>=<value>
+# escape hatch — anything not wrapped
+saltctl raw apply ui_factory_defaults -page system_backup.htm
 ```
 
 See **[FEATURES.md](FEATURES.md)** for the full area/feature map, which pages
@@ -88,9 +118,10 @@ USB, password, factory reset) that use `raw apply`.
 
 ### Tested vs. spec-only
 
-- **Tested against the live box:** `login`, `led get/off/dim/on/set`, `status`,
-  `areas`, `get <area>` across areas, **`set` (AES write) verified via a
-  reversible UPnP toggle**, `raw get/page/post`.
+- **Tested against the live box:** `login`, `models`, `led get/off/dim/on/set`,
+  `status`, `devices`, `areas`, `get <area>` across areas, **the AES write path
+  (`set` / `upnp on`/`off`) verified via a reversible UPnP toggle**,
+  `raw get/post`.
 - **Implemented from the UI's JS but not exercised here** (they change live
   config / restart service): `reboot`, `wifi on/off`, `mesh reboot/reset`, and
   `set`/`raw apply` on connectivity-affecting areas. Try these deliberately;
